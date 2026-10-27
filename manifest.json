@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "com.ennsautomations.wifi-settings",
+  "name": "Wi-Fi Settings",
+  "version": "0.1.0",
+  "author": "Enns Automations",
+  "license": "MIT",
+  "description": "Omarchy network widget with saved Wi-Fi settings: auto-connect, priority, show or copy the password, forget, and switching to a higher-priority network in range.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "service": "RoamService.qml"
+  },
+  "barWidget": {
+    "displayName": "Wi-Fi Settings",
+    "description": "Wi-Fi list, connection state and saved network settings",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.network"
+  }
+}

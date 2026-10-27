@@ -1,0 +1,230 @@
+#!/bin/bash
+
+# Saved Wi-Fi profile reads and edits for the network panel's settings card,
+# and the roaming check its service runs. Profiles are addressed by UUID; the
+# SSID is always the last field so it may contain tabs. Secrets go to stdout
+# only, never argv.
+#
+#   wifi-settings list                    uuid \t autoconnect \t active \t timestamp \t priority \t ssid
+#   wifi-settings show <uuid>             key \t value lines
+#   wifi-settings password <uuid>         the PSK or WEP key
+#   wifi-settings autoconnect <uuid> yes|no
+#   wifi-settings priority <uuid> <-999..999>
+#   wifi-settings forget <uuid>
+#   wifi-settings roaming [on|off]        print or set whether `roam` acts
+#   wifi-settings roam                    one roaming check (see roam() below)
+
+set -euo pipefail
+
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-wifi-settings
+MIN_SIGNAL=${WIFI_ROAM_MIN_SIGNAL:-40}
+
+usage() {
+  sed -n '3,15p' "$0" >&2
+  exit 2
+}
+
+wifi_uuids() {
+  nmcli --get-values UUID,TYPE connection show | awk -F: '$2 == "802-11-wireless" { print $1 }'
+}
+
+require_wifi() {
+  [[ $(nmcli --get-values connection.type connection show uuid "$1" 2>/dev/null) == "802-11-wireless" ]] || {
+    echo "Not a saved Wi-Fi network" >&2
+    exit 1
+  }
+}
+
+# Fills the associative array `f` with the profile's fields. nmcli prints
+# them in its own section order, so they are keyed, never positional.
+load_profile() {
+  local key value
+  f=()
+  while IFS=: read -r key value; do
+    f[$key]=$value
+  done < <(nmcli --escape no --terse --fields \
+    connection.autoconnect,connection.autoconnect-priority,connection.timestamp,GENERAL.STATE,802-11-wireless-security.key-mgmt,802-11-wireless.hidden,802-11-wireless.ssid \
+    connection show uuid "$1")
+  f[active]=no
+  [[ ${f[GENERAL.STATE]:-} == activated ]] && f[active]=yes
+  return 0
+}
+
+declare -A f
+
+# Prints "device<TAB>active-uuid" for the connected Wi-Fi device, if any.
+connected_wifi() {
+  local dev type state
+  while IFS=: read -r dev type state; do
+    [[ $type == wifi && $state == connected ]] || continue
+    printf '%s\t%s\n' "$dev" "$(nmcli --get-values GENERAL.CON-UUID device show "$dev")"
+    return 0
+  done < <(nmcli --terse --fields DEVICE,TYPE,STATE device)
+  return 1
+}
+
+# NetworkManager weighs connection.autoconnect-priority only while it is
+# choosing a network; it never leaves an active one for a better one. On a
+# lower-priority network this rescans and brings up the highest-priority saved
+# network in range at WIFI_ROAM_MIN_SIGNAL or more, ties to the stronger one.
+#
+# A choice made while the better network was already in range is respected:
+# networks at or above the floor on the first check of a new connection are
+# held until they drop out of the scan list and return. A failed switch is held
+# the same way, so a wrong saved password does not drop the current network
+# every check. State: the active UUID on the first line, held UUIDs after it.
+roam() {
+  local state=$STATE_DIR/roam
+  [[ ! -f $STATE_DIR/roaming-off ]] || return 0
+  local line dev active
+  line=$(connected_wifi) || { rm -f "$state"; return 0; }
+  IFS=$'\t' read -r dev active <<<"$line"
+  [[ -n $active && $active != -- ]] || return 0
+
+  local id current_priority=0
+  local -a cand_uuid=() cand_priority=() cand_ssid=()
+  while read -r id; do
+    load_profile "$id"
+    [[ $id == "$active" ]] && current_priority=${f[connection.autoconnect-priority]:-0}
+    [[ ${f[connection.autoconnect]:-} == yes && -n ${f[802-11-wireless.ssid]:-} ]] || continue
+    cand_uuid+=("$id")
+    cand_priority+=("${f[connection.autoconnect-priority]:-0}")
+    cand_ssid+=("${f[802-11-wireless.ssid]}")
+  done < <(wifi_uuids)
+
+  # Nothing ranks above the current network: no scan, nothing held.
+  local i any=0
+  for i in "${!cand_uuid[@]}"; do
+    (( cand_priority[i] > current_priority )) && any=1
+  done
+  if (( ! any )); then
+    printf '%s\n' "$active" >"$state"
+    return 0
+  fi
+
+  # Strongest signal per visible SSID. SIGNAL leads so the SSID may hold colons.
+  local signal name
+  declare -A visible=()
+  while IFS=: read -r signal name; do
+    [[ -n $name ]] || continue
+    (( signal > ${visible[$name]:-0} )) && visible[$name]=$signal
+  done < <(nmcli --escape no --terse --fields SIGNAL,SSID device wifi list ifname "$dev" --rescan auto)
+
+  local -a held=()
+  local first_check=0
+  if [[ -f $state && $(head -n 1 "$state") == "$active" ]]; then
+    mapfile -t held < <(tail -n +2 "$state")
+  else
+    first_check=1
+  fi
+
+  local best=-1 best_signal=0 h is_held
+  local -a next_held=()
+  for i in "${!cand_uuid[@]}"; do
+    (( cand_priority[i] > current_priority )) || continue
+    signal=${visible[${cand_ssid[i]}]:-0}
+    is_held=0
+    for h in "${held[@]}"; do [[ $h == "${cand_uuid[i]}" ]] && is_held=1; done
+
+    if (( first_check )); then
+      (( signal >= MIN_SIGNAL )) && next_held+=("${cand_uuid[i]}")
+      continue
+    fi
+    # Out of range clears the hold, so it counts as new when it returns.
+    if (( is_held )); then
+      (( signal > 0 )) && next_held+=("${cand_uuid[i]}")
+      continue
+    fi
+    (( signal >= MIN_SIGNAL )) || continue
+    if (( best < 0 || cand_priority[i] > cand_priority[best] ||
+          (cand_priority[i] == cand_priority[best] && signal > best_signal) )); then
+      best=$i best_signal=$signal
+    fi
+  done
+
+  { printf '%s\n' "$active"; (( ${#next_held[@]} )) && printf '%s\n' "${next_held[@]}"; } >"$state"
+
+  if (( first_check && ${#next_held[@]} )); then
+    echo "holding: on priority $current_priority by choice while a higher-priority network is in range"
+  fi
+  (( best >= 0 )) || return 0
+
+  echo "switching to ${cand_ssid[best]} (priority ${cand_priority[best]}, signal $best_signal) from priority $current_priority"
+  if ! nmcli --wait 30 connection up uuid "${cand_uuid[best]}" ifname "$dev" >/dev/null; then
+    echo "switch to ${cand_ssid[best]} failed, holding it until it leaves range"
+    printf '%s\n' "${cand_uuid[best]}" >>"$state"
+  fi
+  return 0
+}
+
+cmd=${1:-}
+uuid=${2:-}
+
+case "$cmd" in
+list)
+  while read -r id; do
+    load_profile "$id"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "${f[connection.autoconnect]:-}" "${f[active]}" \
+      "${f[connection.timestamp]:-0}" "${f[connection.autoconnect-priority]:-0}" "${f[802-11-wireless.ssid]:-}"
+  done < <(wifi_uuids)
+  ;;
+show)
+  [[ -n $uuid ]] || usage
+  require_wifi "$uuid"
+  load_profile "$uuid"
+  printf 'uuid\t%s\nautoconnect\t%s\npriority\t%s\ntimestamp\t%s\nactive\t%s\nkeymgmt\t%s\nhidden\t%s\nssid\t%s\n' \
+    "$uuid" "${f[connection.autoconnect]:-}" "${f[connection.autoconnect-priority]:-0}" "${f[connection.timestamp]:-0}" "${f[active]}" \
+    "${f[802-11-wireless-security.key-mgmt]:-}" "${f[802-11-wireless.hidden]:-}" "${f[802-11-wireless.ssid]:-}"
+  ;;
+password)
+  [[ -n $uuid ]] || usage
+  require_wifi "$uuid"
+  f=()
+  while IFS=: read -r key value; do
+    f[$key]=$value
+  done < <(nmcli --show-secrets --escape no --terse --fields \
+    802-11-wireless-security.key-mgmt,802-11-wireless-security.psk,802-11-wireless-security.wep-key0 \
+    connection show uuid "$uuid")
+  key_management=${f[802-11-wireless-security.key-mgmt]:-}
+  password=${f[802-11-wireless-security.psk]:-}
+  [[ $key_management != *eap* && $key_management != *ieee8021x* ]] || {
+    echo "Enterprise Wi-Fi has no shareable password" >&2
+    exit 1
+  }
+  # NetworkManager models WEP as key-mgmt "none" plus a wep-key.
+  [[ -n $key_management && $key_management != none ]] || password=${f[802-11-wireless-security.wep-key0]:-}
+  [[ -n $password ]] || { echo "No saved password" >&2; exit 1; }
+  printf '%s\n' "$password"
+  ;;
+autoconnect)
+  [[ -n $uuid && ${3:-} =~ ^(yes|no)$ ]] || usage
+  require_wifi "$uuid"
+  nmcli connection modify uuid "$uuid" connection.autoconnect "$3"
+  ;;
+priority)
+  [[ -n $uuid && ${3:-} =~ ^-?[0-9]{1,3}$ ]] || usage
+  require_wifi "$uuid"
+  nmcli connection modify uuid "$uuid" connection.autoconnect-priority "$3"
+  ;;
+forget)
+  [[ -n $uuid ]] || usage
+  require_wifi "$uuid"
+  nmcli connection delete uuid "$uuid" >/dev/null
+  ;;
+roaming)
+  mkdir -p "$STATE_DIR"
+  case "${2:-}" in
+  "") [[ -f $STATE_DIR/roaming-off ]] && echo off || echo on ;;
+  on) rm -f "$STATE_DIR/roaming-off" ;;
+  off) : >"$STATE_DIR/roaming-off" ;;
+  *) usage ;;
+  esac
+  ;;
+roam)
+  mkdir -p "$STATE_DIR"
+  roam
+  ;;
+*)
+  usage
+  ;;
+esac
