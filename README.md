@@ -15,6 +15,7 @@ Everything else in the panel (connection details, band, DNS, network list, QR sh
 - Omarchy with the Quattro shell (`omarchy plugin` commands available)
 - NetworkManager as the network backend, with `nmcli`
 - `wl-copy` (wl-clipboard) for copying passwords, as Omarchy ships it
+- `timeout` (coreutils), which ends a password copy after 45 s
 
 Changing a saved network uses `nmcli connection modify` and `delete`. On Omarchy, NetworkManager's polkit rule lets members of the `wheel` group do that from a local session without a password prompt; on other setups NetworkManager may ask for authentication or refuse.
 
@@ -44,15 +45,25 @@ Inside the settings card: `j`/`k` or the arrow keys move, Enter or `l` activates
 
 NetworkManager uses a network's priority only when it is choosing one to join. It never leaves a connected network for a better one. The plugin's service fills that gap. Once a minute, while you are on a lower-priority network, it rescans. If a saved network with a higher priority and auto-connect on is in range at 40% signal or more, it connects to it.
 
-A deliberate choice sticks. If you join a lower network while a higher one is already in range, the service leaves it alone until the higher network drops out of range and comes back. A switch that fails, for example on a wrong saved password, is held the same way, so your current connection is not dropped every minute.
+It only switches to saved networks that need a password or an enterprise login (WPA, WPA2 or WPA3), never to open, OWE or WEP networks, and only when the access point in range uses the same security as the saved network. Anyone can broadcast a network's name, so this keeps the service from moving you onto a stranger's open access point. What it cannot catch is a nearby access point that broadcasts a saved network's name and also knows its password.
+
+A deliberate choice sticks. If you join a lower network while a higher one is already in range, the service leaves it alone until the higher network drops out of range and comes back. A switch that fails, for example on a wrong saved password, is not tried again for 30 minutes, even if the network leaves range and returns, so your current connection is not dropped every minute.
 
 Turn the switching off with **Switch to higher priority** at the bottom of the saved-network list. Priorities still apply when NetworkManager picks a network itself.
 
 ## Privacy and files
 
-- Passwords are read only when you click show or copy. A copy goes straight from `nmcli` to `wl-copy --sensitive`, never through an argument list. A shown password is dropped from memory when the card closes.
+- Passwords are read only when you click show or copy. A copy goes from `nmcli` through a pipe to `timeout 45 wl-copy --sensitive`, never through an argument list, and stays on the clipboard for 45 s. A shown password is cleared from the card when it closes.
 - State lives in `~/.local/state/omarchy-wifi-settings/`: `roam` (the current connection and any held networks) and `roaming-off` (present when switching is off).
-- Nothing is sent anywhere. The plugin only runs `nmcli` and `wl-copy`.
+- The settings card and the roaming service, through the plugin's `wifi-settings` helper, run only `nmcli`, `timeout` and `wl-copy` (plus basic shell text tools) and open no network connection of their own.
+- The roaming service writes each switch, with the name (SSID) of the network it moves to, to the Omarchy shell log.
+- The rest of the panel is Omarchy's `omarchy.network` panel, unchanged, and runs what it runs there:
+  - `omarchy-network-status --verbose` when the panel loads with the shell and every 1.5 s while the panel is open. Each run pings the default gateway and `1.1.1.1` once to show their latency.
+  - `omarchy-network-band` to show the Wi-Fi band (on load, then every 4 s while the panel is open) and to pin a band you pick.
+  - `omarchy-dns` to show the DNS provider and to change the system DNS when you pick one (Omarchy's script handles any authorisation prompt). **Custom** opens it in a terminal with `omarchy-launch-floating-terminal-with-presentation`.
+  - Joining an enterprise (WPA-EAP) network creates its profile with `uuidgen` and `nmcli connection add`. Scanning, connecting and disconnecting otherwise go to NetworkManager directly.
+  - `wl-copy` when you click a connection detail to copy it.
+  - Speed test and QR share open Omarchy's own `omarchy.speedtest` and `omarchy.wifiqr` plugins, which run their own commands; the speed test contacts the internet.
 
 ## Remove
 

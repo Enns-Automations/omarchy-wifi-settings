@@ -36,6 +36,7 @@ Item {
   property string password: ""
   property bool passwordVisible: false
   property string pwRequestUuid: ""
+  property bool copyAgain: false
 
   property string actionKind: ""      // "autoconnect" | "priority" | "forget"
   property bool confirmForget: false
@@ -204,11 +205,19 @@ Item {
   }
 
   // Straight from nmcli to the clipboard: the secret never passes through
-  // QML or an argv.
+  // QML or an argv. wl-copy serves it in the foreground for 45 s, then exits
+  // and the selection drops. The script prints "copied" once the helper
+  // succeeded and wl-copy runs. A copy while one runs stops the old script
+  // (its wl-copy exits when the new one takes the selection) and starts anew.
   function copyPassword() {
-    if (!uuid || copyProc.running) return
+    if (!uuid) return
     error = ""
-    copyProc.command = ["bash", "-c", "set -o pipefail; bash \"$0\" password \"$1\" | wl-copy --trim-newline --sensitive", script, uuid]
+    copyProc.command = ["bash", "-c", "pw=$(bash \"$0\" password \"$1\") || exit; printf '%s\\n' \"$pw\" | timeout 45 wl-copy --foreground --sensitive --trim-newline & unset pw; echo copied; wait $!", script, uuid]
+    if (copyProc.running) {
+      copyAgain = true
+      copyProc.running = false
+      return
+    }
     copyProc.running = true
   }
 
@@ -281,10 +290,19 @@ Item {
         clock.now = root.nowSec()
         if (root.listIndex > root.rows.length) root.listIndex = root.rows.length
         if (root.pendingSsid !== "") {
-          var found = Model.uuidForSsid(root.rows, root.pendingSsid)
+          // By the SSID's bytes: a lookalike profile never opens for the gear.
+          var pick = Model.profileForScanned(root.rows, root.pendingSsid)
           root.pendingSsid = ""
-          if (found) root.openUuid(found)
-          else root.error = "No saved profile for this network"
+          if (pick.uuid) {
+            root.openUuid(pick.uuid)
+          } else if (pick.ambiguous) {
+            root.view = "list"
+            root.fromList = false
+            root.notice = "Several saved networks look like this one"
+            root.loadRoaming()
+          } else {
+            root.error = "No saved profile for this network"
+          }
         }
       }
     }
@@ -325,21 +343,24 @@ Item {
     }
   }
 
+  // Line parsers only: a collecting parser keeps the output in its text/data
+  // after the card drops the password. Only the first line counts,
+  // for the password and for an error.
   Process {
     id: pwProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (!root.opened || root.pwRequestUuid !== root.uuid) return
-        root.password = String(text || "").replace(/\n$/, "")
+    stdout: SplitParser {
+      onRead: function(data) {
+        if (!Model.acceptPassword(root.pwRequestUuid, root.uuid, root.opened) || root.password !== "") return
+        root.password = data
       }
     }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (root.opened && String(text).trim() !== "") root.error = String(text).trim()
+    stderr: SplitParser {
+      onRead: function(data) {
+        if (Model.acceptPassword(root.pwRequestUuid, root.uuid, root.opened) && root.error === "" && data.trim() !== "") root.error = data.trim()
+      }
     }
     onExited: function(exitCode) {
-      if (!root.opened || root.pwRequestUuid !== root.uuid) return
+      if (!Model.acceptPassword(root.pwRequestUuid, root.uuid, root.opened)) return
       if (exitCode === 0 && root.password !== "") root.passwordVisible = true
       else if (root.error === "") root.error = "Could not read the password"
     }
@@ -347,16 +368,27 @@ Item {
 
   Process {
     id: copyProc
+    stdout: SplitParser {
+      onRead: function(data) {
+        if (!root.opened || data !== "copied") return
+        root.notice = "Password copied"
+        noticeTimer.restart()
+      }
+    }
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: if (root.opened && String(text).trim() !== "") root.error = String(text).trim()
     }
+    // 124 is timeout ending wl-copy after 45 s: the normal end of a copy.
     onExited: function(exitCode) {
+      if (root.copyAgain) {
+        root.copyAgain = false
+        copyProc.running = true
+        return
+      }
       if (!root.opened) return
-      if (exitCode === 0) {
-        root.notice = "Password copied"
-        noticeTimer.restart()
-      } else if (root.error === "") {
+      if (exitCode !== 0 && exitCode !== 124 && root.error === "") {
+        root.notice = ""
         root.error = "Could not copy the password"
       }
     }
@@ -453,7 +485,7 @@ Item {
             textFormat: Text.PlainText
             text: root.view === "list"
               ? "Saved networks"
-              : (root.profile ? (root.profile.ssid || "Hidden network") : "Wi-Fi settings")
+              : (root.profile ? (Model.visibleSsid(Model.ssidFromHex(root.profile.ssidHex) || root.profile.ssid) || "Hidden network") : "Wi-Fi settings")
             color: root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.title
@@ -512,11 +544,15 @@ Item {
         interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
         model: root.view === "list" ? root.rows : []
+        // Titles and captions, row for row: control and format characters
+        // visible, a UUID prefix where two titles are still equal.
+        readonly property var rendered: Model.renderRows(root.rows, root.nowSeconds)
 
         delegate: CursorSurface {
           id: savedRow
           required property var modelData
           required property int index
+          readonly property var shown: listView.rendered[index] || ({ title: "", caption: "" })
 
           width: ListView.view.width
           implicitHeight: savedBody.implicitHeight + Style.spacing.rowPaddingX
@@ -551,7 +587,7 @@ Item {
               Text {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
-                text: savedRow.modelData.ssid || "Hidden network"
+                text: savedRow.shown.title
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.body
@@ -560,7 +596,7 @@ Item {
               Text {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
-                text: Model.listCaption(savedRow.modelData, root.nowSeconds)
+                text: savedRow.shown.caption
                 color: Qt.darker(root.bar.foreground, 1.5)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
