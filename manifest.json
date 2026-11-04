@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "com.ennsautomations.wifi-settings",
   "name": "Wi-Fi Settings",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Enns Automations",
   "license": "MIT",
   "description": "Omarchy network widget with saved Wi-Fi settings: auto-connect, priority, show or copy the password, forget, and switching to a higher-priority network in range.",

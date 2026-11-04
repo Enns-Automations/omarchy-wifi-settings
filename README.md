@@ -8,7 +8,7 @@ A drop-in replacement for Omarchy's network bar widget that adds settings for sa
 - **Password**: show it, or copy it to the clipboard.
 - **Forget**: delete the saved network, with a confirmation click.
 
-Everything else in the panel (connection details, band, DNS, network list, QR share, speed test) is Omarchy's own `omarchy.network` panel, unchanged.
+Everything else in the panel (connection details, band, DNS, network list, QR share, speed test) is Omarchy's own `omarchy.network` panel, unchanged except for joining enterprise networks (see [Enterprise networks](#enterprise-networks)).
 
 ## Requirements
 
@@ -51,17 +51,21 @@ A deliberate choice sticks. If you join a lower network while a higher one is al
 
 Turn the switching off with **Switch to higher priority** at the bottom of the saved-network list. Priorities still apply when NetworkManager picks a network itself.
 
+### Enterprise networks
+
+The panel does not join an enterprise (WPA-EAP, 802.1X) network you have not saved yet. Omarchy's built-in panel asks only for an identity and password and saves a profile that does not check the network's server certificate, so any access point using the same name could collect your login. Selecting such a network here opens `nmtui edit` in a terminal instead. Add a Wi-Fi connection there with **WPA & WPA2 Enterprise** and set the **CA cert** and **Domain** your network's administrator gives you. Once it is saved, the network connects from the panel like any other.
+
 ## Privacy and files
 
 - Passwords are read only when you click show or copy. A copy goes from `nmcli` through a pipe to `timeout 45 wl-copy --sensitive`, never through an argument list, and stays on the clipboard for 45 s. A shown password is cleared from the card when it closes.
 - State lives in `~/.local/state/omarchy-wifi-settings/`: `roam` (the current connection and any held networks) and `roaming-off` (present when switching is off).
 - The settings card and the roaming service, through the plugin's `wifi-settings` helper, run only `nmcli`, `timeout` and `wl-copy` (plus basic shell text tools) and open no network connection of their own.
 - The roaming service writes each switch, with the name (SSID) of the network it moves to, to the Omarchy shell log.
-- The rest of the panel is Omarchy's `omarchy.network` panel, unchanged, and runs what it runs there:
+- The rest of the panel is Omarchy's `omarchy.network` panel and runs what it runs there, with the one change for enterprise networks noted below:
   - `omarchy-network-status --verbose` when the panel loads with the shell and every 1.5 s while the panel is open. Each run pings the default gateway and `1.1.1.1` once to show their latency.
   - `omarchy-network-band` to show the Wi-Fi band (on load, then every 4 s while the panel is open) and to pin a band you pick.
   - `omarchy-dns` to show the DNS provider and to change the system DNS when you pick one (Omarchy's script handles any authorisation prompt). **Custom** opens it in a terminal with `omarchy-launch-floating-terminal-with-presentation`.
-  - Joining an enterprise (WPA-EAP) network creates its profile with `uuidgen` and `nmcli connection add`. Scanning, connecting and disconnecting otherwise go to NetworkManager directly.
+  - Selecting an enterprise (WPA-EAP) network you have not saved opens `nmtui edit` with `omarchy-launch-floating-terminal-with-presentation`. This is the plugin's change: Omarchy's panel joins the network itself. Scanning, connecting and disconnecting otherwise go to NetworkManager directly.
   - `wl-copy` when you click a connection detail to copy it.
   - Speed test and QR share open Omarchy's own `omarchy.speedtest` and `omarchy.wifiqr` plugins, which run their own commands; the speed test contacts the internet.
 

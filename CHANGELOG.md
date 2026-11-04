@@ -2,6 +2,10 @@
 
 User-facing changes per release, newest first. Written by the release job from `.changes/`.
 
+## 0.1.3 — 2026-11-04
+
+- Opens `nmtui edit` for an unsaved enterprise (802.1X) network instead of joining it, since the built-in join saves a profile that checks no server certificate.
+
 ## 0.1.2 — 2026-11-03
 
 - Publishes the 0.1.1 fixes to GitHub; the 0.1.1 release was tagged but never published.
